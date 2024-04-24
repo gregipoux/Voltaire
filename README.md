@@ -16,7 +16,7 @@ Avant que vous puissiez bénéficier de la magie de cette extension, assurez-vou
 Instructions :
 
 Télécharger le Grimoire:
-Allez à la chambre forte de GitHub où repose le code source de cette extension. Voici l'incantation pour y parvenir: [URL du dépôt GitHub].
+Allez à la chambre forte de GitHub où repose le code source de cette extension. Voici l'incantation pour y parvenir: (https://github.com/gregipoux/Voltaire).
 Pressez sur le bouton noble et vert, Code, puis choisissez Download ZIP. Téléchargez ce paquet de savoirs sur votre machine.
 Déballer le Parchemin:
 Ouvrez le fichier ZIP que vous avez acquis et extrayez son contenu dans un dossier de votre choix. Ce dossier sera le sanctuaire de notre extension.
