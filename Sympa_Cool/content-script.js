@@ -1,5 +1,5 @@
 // Hark! L'instrument de notre vigilance est chargé et prêt!
-console.log("Content script loaded and running.");
+console.log("[Voltaire] Content script loaded and running.");
 
 // Cache pour éviter de ré-analyser les mêmes phrases
 const analyzedPhrases = new WeakSet();
@@ -14,25 +14,39 @@ function debounce(func, wait) {
   };
 }
 
-// Trouve tous les divs avec la classe css-146c3p1 dans un conteneur
+// Trouve tous les divs avec du texte dans un conteneur
 function findTextDivs(container) {
-  // Sélecteur pour les divs avec la classe css-146c3p1 (qui commence par css-)
-  // On cherche les divs qui ont dir="auto" et contiennent du texte
-  const allDivs = container.querySelectorAll('div[dir="auto"]');
-  const textDivs = Array.from(allDivs).filter(div => {
+  // Méthode 1: Chercher les divs avec dir="auto" (structure spécifique)
+  const divsWithDir = container.querySelectorAll('div[dir="auto"]');
+  const textDivs1 = Array.from(divsWithDir).filter(div => {
     const text = div.textContent.trim();
-    // Ignorer les divs vides ou qui ne contiennent que des espaces
     return text.length > 0;
   });
-  return textDivs;
+  
+  // Méthode 2: Si pas de résultats, chercher tous les divs avec du texte direct
+  if (textDivs1.length === 0) {
+    const allDivs = container.querySelectorAll('div');
+    const textDivs2 = Array.from(allDivs).filter(div => {
+      // Ignorer les divs qui contiennent d'autres divs (conteneurs)
+      if (div.querySelector('div')) {
+        return false;
+      }
+      const text = div.textContent.trim();
+      // Ignorer les divs vides ou qui ne contiennent que des espaces
+      return text.length > 0 && text.length < 100; // Limiter la longueur pour éviter les gros blocs
+    });
+    return textDivs2;
+  }
+  
+  return textDivs1;
 }
 
-// Identifie les conteneurs de phrases dans #root
+// Identifie les conteneurs de phrases dans un élément
 // Un conteneur de phrase est un div parent qui contient plusieurs mots (divs avec texte)
 function findSentenceContainers(rootElement) {
   const containers = [];
   
-  // Parcourir tous les divs dans #root
+  // Parcourir tous les divs dans l'élément
   const allDivs = rootElement.querySelectorAll('div');
   
   allDivs.forEach(div => {
@@ -41,11 +55,20 @@ function findSentenceContainers(rootElement) {
       return;
     }
     
+    // Ignorer les divs qui sont trop petits (probablement des mots individuels)
+    if (div.children.length === 0 && div.textContent.trim().length < 10) {
+      return;
+    }
+    
     // Chercher les divs enfants avec du texte
     const textDivs = findTextDivs(div);
     
     // Si le conteneur a au moins 2 mots, c'est probablement une phrase
-    if (textDivs.length >= 2) {
+    // Ou si le conteneur lui-même contient du texte significatif
+    const hasDirectText = div.textContent.trim().length > 20;
+    const hasMultipleWords = textDivs.length >= 2;
+    
+    if (hasMultipleWords || hasDirectText) {
       // Vérifier que ce n'est pas un conteneur déjà inclus dans un autre
       let isSubContainer = false;
       containers.forEach(existingContainer => {
@@ -60,6 +83,27 @@ function findSentenceContainers(rootElement) {
     }
   });
   
+  // Si aucun conteneur trouvé avec la méthode normale, essayer de trouver des paragraphes ou spans
+  if (containers.length === 0) {
+    const paragraphs = rootElement.querySelectorAll('p, span, div');
+    Array.from(paragraphs).forEach(elem => {
+      const text = elem.textContent.trim();
+      // Chercher des éléments avec du texte significatif (au moins 10 caractères)
+      if (text.length >= 10 && !elem.hasAttribute('data-voltaire-analyzed')) {
+        // Vérifier qu'il n'est pas déjà inclus
+        let isSubContainer = false;
+        containers.forEach(existingContainer => {
+          if (existingContainer.contains(elem)) {
+            isSubContainer = true;
+          }
+        });
+        if (!isSubContainer) {
+          containers.push(elem);
+        }
+      }
+    });
+  }
+  
   return containers;
 }
 
@@ -70,6 +114,48 @@ function reconstructText(container) {
   // Obtenir le texte complet directement du conteneur pour garantir l'exactitude
   // innerText préserve mieux les espaces que textContent
   const fullText = container.innerText || container.textContent || '';
+  
+  // Si aucun div trouvé mais le conteneur a du texte direct, créer un mapping simple
+  if (textDivs.length === 0 && fullText.trim().length > 0) {
+    // Créer un mapping simple pour le texte direct
+    const divMapping = new Array(fullText.length);
+    const wordDivs = [];
+    
+    // Diviser le texte en mots
+    const words = fullText.split(/\s+/);
+    let currentOffset = 0;
+    
+    words.forEach((word, index) => {
+      if (word.trim().length === 0) return;
+      
+      const wordStart = fullText.indexOf(word, currentOffset);
+      if (wordStart !== -1) {
+        for (let i = 0; i < word.length && (wordStart + i) < fullText.length; i++) {
+          divMapping[wordStart + i] = {
+            div: container,
+            charIndex: i,
+            wordIndex: index
+          };
+        }
+        
+        wordDivs.push({
+          div: container,
+          startOffset: wordStart,
+          endOffset: wordStart + word.length,
+          text: word
+        });
+        
+        currentOffset = wordStart + word.length;
+      }
+    });
+    
+    return {
+      text: fullText,
+      mapping: divMapping,
+      textDivs: [container],
+      wordDivs: wordDivs
+    };
+  }
   
   // Créer un Range pour parcourir le texte et mapper chaque caractère à son div
   const range = document.createRange();
@@ -235,8 +321,22 @@ function findDivByErrorText(errorText, textData) {
 
 // Insère un point "." devant le div du mot fautif
 function insertDotBeforeDiv(targetDiv) {
-  if (!targetDiv || targetDiv.hasAttribute('data-voltaire-dot')) {
+  if (!targetDiv) {
+    console.warn('[Voltaire] Cannot insert dot: targetDiv is null');
+    return;
+  }
+  
+  // Vérifier si déjà modifié (chercher dans le parent aussi)
+  if (targetDiv.hasAttribute('data-voltaire-dot')) {
     return; // Déjà modifié
+  }
+  
+  // Vérifier si un point a déjà été inséré avant ce div
+  const previousSibling = targetDiv.previousSibling;
+  if (previousSibling && 
+      previousSibling.nodeType === Node.ELEMENT_NODE && 
+      previousSibling.hasAttribute('data-voltaire-dot')) {
+    return; // Déjà un point avant
   }
   
   // Créer le span avec le point
@@ -251,7 +351,20 @@ function insertDotBeforeDiv(targetDiv) {
   dotSpan.setAttribute('data-voltaire', '1');
   dotSpan.setAttribute('data-voltaire-dot', '1');
   
-
+  // Essayer d'insérer avant le div (méthode préférée)
+  const parent = targetDiv.parentNode;
+  if (parent) {
+    try {
+      parent.insertBefore(dotSpan, targetDiv);
+      targetDiv.setAttribute('data-voltaire-dot', '1'); // Marquer le div aussi
+      console.log('[Voltaire] Dot inserted before div:', targetDiv.textContent.trim().substring(0, 20));
+      return;
+    } catch (e) {
+      console.warn('[Voltaire] Failed to insert before div, trying inside:', e);
+    }
+  }
+  
+  // Fallback: insérer à l'intérieur du div
   let insertPosition = null;
   
   // Parcourir les enfants pour trouver où insérer
@@ -280,6 +393,7 @@ function insertDotBeforeDiv(targetDiv) {
   }
   
   targetDiv.setAttribute('data-voltaire-dot', '1'); // Marquer le div aussi
+  console.log('[Voltaire] Dot inserted inside div:', targetDiv.textContent.trim().substring(0, 20));
 }
 
 // Affiche les corrections en insérant des points devant les mots fautifs
@@ -289,8 +403,8 @@ function displayCorrection(container, textData, corrections) {
     return;
   }
 
-  console.log('Corrections:', corrections);
-  console.log('Text data:', {
+  console.log('[Voltaire] Corrections:', corrections);
+  console.log('[Voltaire] Text data:', {
     text: textData.text,
     textLength: textData.text.length,
     mappingLength: textData.mapping.length,
@@ -303,7 +417,7 @@ function displayCorrection(container, textData, corrections) {
   corrections.forEach(correction => {
     const { offset, length } = correction;
     const errorText = textData.text.substring(offset, offset + length).trim();
-    console.log('Processing error at offset:', offset, 'with length:', length, 'error text:', errorText);
+    console.log('[Voltaire] Processing error at offset:', offset, 'with length:', length, 'error text:', errorText);
 
     // Méthode 1: Essayer de trouver le div par le texte de l'erreur (plus fiable)
     let targetDiv = findDivByErrorText(errorText, textData);
@@ -313,9 +427,43 @@ function displayCorrection(container, textData, corrections) {
       targetDiv = findDivForOffset(container, offset, textData, length);
     }
     
+    // Méthode 3: Si toujours pas trouvé et qu'on a un seul conteneur, utiliser le conteneur
+    if (!targetDiv && textData.wordDivs.length === 0 && container) {
+      // Le texte est directement dans le conteneur, pas de divs individuels
+      // On va insérer le point dans le conteneur au bon endroit
+      const errorStartInText = textData.text.indexOf(errorText, offset - 10);
+      if (errorStartInText !== -1) {
+        // Créer un Range pour insérer le point au bon endroit
+        try {
+          const range = document.createRange();
+          const textNode = container.firstChild;
+          if (textNode && textNode.nodeType === Node.TEXT_NODE) {
+            const textContent = textNode.textContent;
+            const errorPos = textContent.indexOf(errorText);
+            if (errorPos !== -1) {
+              range.setStart(textNode, errorPos);
+              range.setEnd(textNode, errorPos);
+              const dotSpan = document.createElement('span');
+              dotSpan.textContent = '.';
+              dotSpan.style.color = 'black';
+              dotSpan.setAttribute('data-voltaire', '1');
+              dotSpan.setAttribute('data-voltaire-dot', '1');
+              range.insertNode(dotSpan);
+              console.log('[Voltaire] Dot inserted using Range at position:', errorPos);
+              return;
+            }
+          }
+        } catch (e) {
+          console.warn('[Voltaire] Failed to insert using Range:', e);
+        }
+      }
+      // Fallback: utiliser le conteneur directement
+      targetDiv = container;
+    }
+    
     if (targetDiv) {
       const wordText = targetDiv.textContent.trim();
-      console.log('Found div for error, word:', wordText, 'error text was:', errorText);
+      console.log('[Voltaire] Found div for error, word:', wordText.substring(0, 30), 'error text was:', errorText);
       
       // Vérifier que le div trouvé correspond bien à l'erreur
       // (pour éviter les faux positifs)
@@ -324,20 +472,26 @@ function displayCorrection(container, textData, corrections) {
       
       if (wordTextLower === errorTextLower || 
           wordTextLower.includes(errorTextLower) || 
-          errorTextLower.includes(wordTextLower)) {
+          errorTextLower.includes(wordTextLower) ||
+          wordTextLower.split(/\s+/).some(w => w === errorTextLower)) {
         insertDotBeforeDiv(targetDiv);
       } else {
-        console.warn('Div found but text does not match:', wordText, 'vs', errorText);
+        console.warn('[Voltaire] Div found but text does not match exactly:', wordText.substring(0, 30), 'vs', errorText);
         // Essayer quand même si c'est le seul div proche de l'offset
         insertDotBeforeDiv(targetDiv);
       }
     } else {
-      console.error('Error: Could not find div for offset:', offset, 'length:', length, 'error text:', errorText);
-      console.log('Available word divs:', textData.wordDivs.map(w => ({
+      console.error('[Voltaire] Error: Could not find div for offset:', offset, 'length:', length, 'error text:', errorText);
+      console.log('[Voltaire] Available word divs:', textData.wordDivs.map(w => ({
         start: w.startOffset,
         end: w.endOffset,
-        text: w.div.textContent.trim()
+        text: w.div.textContent.trim().substring(0, 20)
       })));
+      // Dernier recours: essayer d'insérer dans le conteneur
+      if (container) {
+        console.log('[Voltaire] Trying to insert dot in container as fallback');
+        insertDotBeforeDiv(container);
+      }
     }
   });
 }
@@ -358,15 +512,20 @@ function checkAndDisplayCorrections(container) {
     return;
   }
   
+  // Ignorer les textes trop courts (probablement pas des phrases complètes)
+  if (trimmedText.length < 5) {
+    return;
+  }
+  
   // Calculer le décalage (nombre d'espaces au début)
   const leadingSpaces = originalText.length - originalText.trimStart().length;
   
-  console.log('Analyzing text:', trimmedText);
-  console.log('Original text length:', originalText.length);
-  console.log('Trimmed text length:', trimmedText.length);
-  console.log('Leading spaces:', leadingSpaces);
-  console.log('Text divs found:', textData.textDivs.length);
-  console.log('Words:', textData.wordDivs.map(w => w.div.textContent.trim()));
+  console.log('[Voltaire] Analyzing text:', trimmedText.substring(0, 100));
+  console.log('[Voltaire] Original text length:', originalText.length);
+  console.log('[Voltaire] Trimmed text length:', trimmedText.length);
+  console.log('[Voltaire] Leading spaces:', leadingSpaces);
+  console.log('[Voltaire] Text divs found:', textData.textDivs.length);
+  console.log('[Voltaire] Words:', textData.wordDivs.length > 0 ? textData.wordDivs.map(w => w.div.textContent.trim()).slice(0, 10) : 'No word divs');
   
   // Appeler l'API LanguageTool via le service worker pour éviter les problèmes CORS
   chrome.runtime.sendMessage({
@@ -379,7 +538,7 @@ function checkAndDisplayCorrections(container) {
       // Ne logger que si ce n'est pas une erreur de port fermé (normale)
       if (!chrome.runtime.lastError.message.includes('port') && 
           !chrome.runtime.lastError.message.includes('closed')) {
-        console.debug('Service worker error:', chrome.runtime.lastError.message);
+        console.error('[Voltaire] Service worker error:', chrome.runtime.lastError.message);
       }
       // Marquer comme analysé même en cas d'erreur pour éviter les boucles
       analyzedPhrases.add(container);
@@ -389,23 +548,39 @@ function checkAndDisplayCorrections(container) {
     
     // Vérifier si la réponse contient une erreur
     if (response && response.error) {
-      console.debug('LanguageTool API error:', response.error);
+      console.error('[Voltaire] LanguageTool API error:', response.error);
       // Marquer comme analysé même en cas d'erreur
       analyzedPhrases.add(container);
       container.setAttribute('data-voltaire-analyzed', '1');
       return;
     }
     
+    // Vérifier si la réponse est valide
+    if (!response) {
+      console.error('[Voltaire] No response from LanguageTool API');
+      analyzedPhrases.add(container);
+      container.setAttribute('data-voltaire-analyzed', '1');
+      return;
+    }
+    
     if (response && response.matches && Array.isArray(response.matches) && response.matches.length > 0) {
-      console.log('API Response:', response);
+      console.log('[Voltaire] API Response received, matches:', response.matches.length);
       // Ajuster les offsets pour tenir compte du trim
       const adjustedMatches = response.matches.map(match => ({
-        ...match,
-        offset: match.offset + leadingSpaces
+        offset: match.offset + leadingSpaces,
+        length: match.length,
+        message: match.message,
+        replacements: match.replacements,
+        context: match.context
       }));
+      console.log('[Voltaire] Adjusted matches:', adjustedMatches.map(m => ({
+        offset: m.offset,
+        length: m.length,
+        text: originalText.substring(m.offset, m.offset + m.length)
+      })));
       displayCorrection(container, textData, adjustedMatches);
     } else {
-      console.log('No errors found');
+      console.log('[Voltaire] No errors found in text:', trimmedText.substring(0, 50));
     }
     
     // Marquer comme analysé
@@ -421,23 +596,34 @@ const debouncedCheckAndDisplayCorrections = debounce(checkAndDisplayCorrections,
 function analyzeAllSentences() {
   const rootElement = document.getElementById('root');
   if (!rootElement) {
-    console.log('Root element not found, waiting...');
+    console.log('[Voltaire] Root element not found, trying body element...');
+    // Fallback: utiliser body si #root n'existe pas
+    const bodyElement = document.body;
+    if (bodyElement) {
+      const containers = findSentenceContainers(bodyElement);
+      console.log('[Voltaire] Found', containers.length, 'sentence containers in body');
+      containers.forEach(container => {
+        debouncedCheckAndDisplayCorrections(container);
+      });
+    }
     return;
   }
   
   const containers = findSentenceContainers(rootElement);
-  console.log('Found', containers.length, 'sentence containers');
+  console.log('[Voltaire] Found', containers.length, 'sentence containers in #root');
   
   containers.forEach(container => {
     debouncedCheckAndDisplayCorrections(container);
   });
 }
 
-// Initialise le MutationObserver pour surveiller #root
+// Initialise le MutationObserver pour surveiller #root ou body
 function initMutationObserver() {
   const rootElement = document.getElementById('root');
-  if (!rootElement) {
-    // Attendre que #root soit disponible
+  const targetElement = rootElement || document.body;
+  
+  if (!targetElement) {
+    // Attendre que le DOM soit disponible
     setTimeout(initMutationObserver, 100);
     return;
   }
@@ -452,12 +638,12 @@ function initMutationObserver() {
           return;
         }
         
-        // Si un nouveau nœud est ajouté dans #root, analyser
+        // Si un nouveau nœud est ajouté, analyser
         if (node.nodeType === Node.ELEMENT_NODE || node.nodeType === Node.TEXT_NODE) {
-          // Vérifier si c'est dans #root ou un descendant
+          // Vérifier si c'est dans l'élément cible ou un descendant
           let parent = node.parentNode;
           while (parent) {
-            if (parent.id === 'root') {
+            if (parent === targetElement || parent.id === 'root') {
               shouldAnalyze = true;
               break;
             }
@@ -475,14 +661,14 @@ function initMutationObserver() {
     }
   });
 
-  // Observer #root et tous ses descendants
-  observer.observe(rootElement, { 
+  // Observer l'élément cible et tous ses descendants
+  observer.observe(targetElement, { 
     childList: true, 
     subtree: true,
     characterData: true
   });
   
-  console.log('MutationObserver initialized for #root');
+  console.log('[Voltaire] MutationObserver initialized for', rootElement ? '#root' : 'body');
   
   // Analyser les phrases existantes
   setTimeout(() => {

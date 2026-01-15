@@ -14,9 +14,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'checkText') {
     const { text, language } = request;
     
+    if (!text || text.trim().length === 0) {
+      console.warn('[Voltaire] Empty text received');
+      sendResponse({ matches: [] });
+      return false;
+    }
+    
+    console.log('[Voltaire] Checking text:', text.substring(0, 50) + '...', 'language:', language);
+    
     // Appeler l'API LanguageTool depuis le service worker (évite les problèmes CORS)
     // L'API LanguageTool accepte POST avec les paramètres dans l'URL ou dans le body
-    const url = `https://api.languagetool.org/v2/check?language=${language}&text=${encodeURIComponent(text)}`;
+    const url = `https://api.languagetool.org/v2/check?language=${language || 'fr'}&text=${encodeURIComponent(text)}`;
     
     fetch(url, {
       method: 'POST',
@@ -32,22 +40,26 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       return response.json();
     })
     .then(data => {
+      console.log('[Voltaire] LanguageTool API response:', {
+        matches: data.matches?.length || 0,
+        language: data.language?.code
+      });
       // S'assurer que sendResponse est toujours appelé avec succès
       try {
         sendResponse(data);
       } catch (e) {
         // Ignorer les erreurs si le port est fermé
-        console.debug('Response already sent or port closed');
+        console.debug('[Voltaire] Response already sent or port closed');
       }
     })
     .catch(error => {
-      // Logger l'erreur de manière moins intrusive
-      console.debug('LanguageTool API error:', error.message);
+      // Logger l'erreur
+      console.error('[Voltaire] LanguageTool API error:', error.message);
       // Toujours répondre pour éviter les erreurs "message port closed"
       try {
         sendResponse({ error: error.message, matches: [] });
       } catch (e) {
-        console.debug('Response already sent or port closed');
+        console.debug('[Voltaire] Response already sent or port closed');
       }
     });
     
