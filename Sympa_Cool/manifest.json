@@ -8,7 +8,8 @@
     "scripting"
   ],
   "host_permissions": [
-    "*://api.languagetool.org/*"
+    "*://api.languagetool.org/*",
+    "http://localhost:8080/*"
   ],
   "background": {
     "service_worker": "background.js"

@@ -9,7 +9,52 @@ chrome.action.onClicked.addListener(function(tab) {
     });
 });
 
-// Écouter les messages du content script pour appeler l'API LanguageTool
+// Convertit le format de réponse Grammalecte vers le format LanguageTool
+function convertGrammalecteToLanguageTool(grammalecteResponse) {
+  const matches = [];
+  
+  // Vérifier si la réponse contient des données
+  if (!grammalecteResponse || !grammalecteResponse.data || !Array.isArray(grammalecteResponse.data)) {
+    return { matches: [] };
+  }
+  
+  // Traiter chaque paragraphe dans la réponse
+  grammalecteResponse.data.forEach(paragraph => {
+    // Traiter les erreurs grammaticales
+    if (paragraph.lGrammarErrors && Array.isArray(paragraph.lGrammarErrors)) {
+      paragraph.lGrammarErrors.forEach(err => {
+        if (err.nStart !== undefined && err.nEnd !== undefined) {
+          matches.push({
+            offset: err.nStart,
+            length: err.nEnd - err.nStart,
+            message: err.sMessage || err.sRuleId || 'Erreur grammaticale',
+            replacements: err.aSuggestions || [],
+            context: { text: err.sValue || '' }
+          });
+        }
+      });
+    }
+    
+    // Traiter les erreurs d'orthographe
+    if (paragraph.lSpellingErrors && Array.isArray(paragraph.lSpellingErrors)) {
+      paragraph.lSpellingErrors.forEach(err => {
+        if (err.nStart !== undefined && err.nEnd !== undefined) {
+          matches.push({
+            offset: err.nStart,
+            length: err.nEnd - err.nStart,
+            message: `Faute d'orthographe : ${err.sValue || ''}`,
+            replacements: err.aSuggestions || [],
+            context: { text: err.sValue || '' }
+          });
+        }
+      });
+    }
+  });
+  
+  return { matches };
+}
+
+// Écouter les messages du content script pour appeler l'API Grammalecte
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'checkText') {
     const { text, language } = request;
@@ -22,16 +67,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     
     console.log('[Voltaire] Checking text:', text.substring(0, 50) + '...', 'language:', language);
     
-    // Appeler l'API LanguageTool depuis le service worker (évite les problèmes CORS)
-    // L'API LanguageTool accepte POST avec les paramètres dans l'URL ou dans le body
-    const url = `https://api.languagetool.org/v2/check?language=${language || 'fr'}&text=${encodeURIComponent(text)}`;
+    // Appeler le serveur Grammalecte local
+    const url = 'http://localhost:8080/gc_text/fr';
+    
+    // Préparer les données pour le POST (format application/x-www-form-urlencoded)
+    const formData = new URLSearchParams();
+    formData.append('text', text);
     
     fetch(url, {
       method: 'POST',
       headers: {
         'Accept': 'application/json',
         'Content-Type': 'application/x-www-form-urlencoded'
-      }
+      },
+      body: formData.toString()
     })
     .then(response => {
       if (!response.ok) {
@@ -40,21 +89,31 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       return response.json();
     })
     .then(data => {
-      console.log('[Voltaire] LanguageTool API response:', {
-        matches: data.matches?.length || 0,
-        language: data.language?.code
+      console.log('[Voltaire] Grammalecte API response received');
+      
+      // Convertir le format Grammalecte vers le format LanguageTool
+      const convertedData = convertGrammalecteToLanguageTool(data);
+      
+      console.log('[Voltaire] Converted response:', {
+        matches: convertedData.matches?.length || 0
       });
+      
       // S'assurer que sendResponse est toujours appelé avec succès
       try {
-        sendResponse(data);
+        sendResponse(convertedData);
       } catch (e) {
         // Ignorer les erreurs si le port est fermé
         console.debug('[Voltaire] Response already sent or port closed');
       }
     })
     .catch(error => {
-      // Logger l'erreur
-      console.error('[Voltaire] LanguageTool API error:', error.message);
+      // Logger l'erreur avec un message clair
+      if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
+        console.error('[Voltaire] Grammalecte server not available. Please start the server with: python grammalecte-server.py');
+      } else {
+        console.error('[Voltaire] Grammalecte API error:', error.message);
+      }
+      
       // Toujours répondre pour éviter les erreurs "message port closed"
       try {
         sendResponse({ error: error.message, matches: [] });
